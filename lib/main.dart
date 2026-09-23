@@ -2340,8 +2340,18 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Numeric TRC command ids, filled in from a capture of the official app.
-  Map<String, int> micProCommandCodes = <String, int>{};
+  /// Numeric TRC command ids recovered from the accessory protocol trace.
+  ///
+  /// The frame uses 16-bit little-endian command ids. Keeping the names
+  /// identical to the native sender makes a failed protocol step actionable.
+  Map<String, int> micProCommandCodes = <String, int>{
+    'TRC_APP_CMD_READY_WALLPAPER': 33,
+    'TRC_APP_CMD_GET_WALLPAPER': 34,
+    'APP_CMD_WRITE_FILE_BEGIN': 40,
+    'APP_CMD_WRITE_FILE_DATA': 41,
+    'APP_CMD_WRITE_FILE_END': 42,
+    'APP_CMD_WRITE_FILE_CANCEL': 43,
+  };
 
   /// Bluetooth address of the transmitter once discovered.
   String? micProDeviceAddress;
