@@ -1310,6 +1310,9 @@ class AppController extends ChangeNotifier {
           '录像已结束，可同步分析',
           'Recording finished; ready to analyze',
         );
+        if (connectionIsActive) {
+          unawaited(syncLatestMedia(automatic: true));
+        }
       case 'recording_error':
         recordingActive = false;
         recordingStatus = text('录像失败', 'Recording failed');
