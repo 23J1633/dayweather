@@ -568,11 +568,19 @@ class AppController extends ChangeNotifier {
           endMs: end,
         );
         if (frames.isNotEmpty) {
-          videoAnalysis = await qwen.understandVideoFrames(
-            frames: frames,
-            sourceStartMs: start,
-            sourceEndMs: end,
-          );
+          try {
+            videoAnalysis = await qwen.understandVideoFrames(
+              frames: frames,
+              sourceStartMs: start,
+              sourceEndMs: end,
+            );
+          } catch (error) {
+            analysisMessage = text(
+              '画面理解暂时超时，继续使用音频与情绪分析…',
+              'Visual understanding timed out; continuing with audio and mood analysis…',
+            );
+            notifyListeners();
+          }
           if (videoAnalysis != null && videoAnalysis.events.isNotEmpty) {
             analyzedVideoEvents.addAll(
               videoAnalysis.events.map(
@@ -1561,11 +1569,19 @@ class AppController extends ChangeNotifier {
           );
           VideoAnalysisResult? videoAnalysis;
           if (frames.isNotEmpty) {
-            videoAnalysis = await qwen.understandVideoFrames(
-              frames: frames,
-              sourceStartMs: startMs,
-              sourceEndMs: endMs,
-            );
+            try {
+              videoAnalysis = await qwen.understandVideoFrames(
+                frames: frames,
+                sourceStartMs: startMs,
+                sourceEndMs: endMs,
+              );
+            } catch (error) {
+              realtimeStatus = text(
+                '画面理解超时，继续使用音频分析 $label…',
+                'Visual understanding timed out; continuing with audio for $label…',
+              );
+              notifyListeners();
+            }
           }
           final transcript = segment?.text.trim() ?? '';
           MoodResult? mood;
@@ -1907,28 +1923,36 @@ class AppController extends ChangeNotifier {
       VideoAnalysisResult? videoAnalysis;
       final liveSourcePath = sourcePath;
       final sourceDuration = mediaInfo?.durationMs ?? 0;
-      if (videoFrames.isNotEmpty) {
-        videoAnalysis = await qwen.understandVideoFrames(
-          frames: videoFrames,
-          sourceStartMs: startMs,
-          sourceEndMs: endMs,
-        );
-      } else if (liveSourcePath != null &&
-          liveSourcePath.isNotEmpty &&
-          startMs < sourceDuration) {
-        final videoEnd = math.min(endMs, sourceDuration);
-        final frames = await native.extractVideoFrames(
-          path: liveSourcePath,
-          startMs: startMs,
-          endMs: videoEnd,
-        );
-        if (frames.isNotEmpty) {
+      try {
+        if (videoFrames.isNotEmpty) {
           videoAnalysis = await qwen.understandVideoFrames(
-            frames: frames,
+            frames: videoFrames,
             sourceStartMs: startMs,
-            sourceEndMs: videoEnd,
+            sourceEndMs: endMs,
           );
+        } else if (liveSourcePath != null &&
+            liveSourcePath.isNotEmpty &&
+            startMs < sourceDuration) {
+          final videoEnd = math.min(endMs, sourceDuration);
+          final frames = await native.extractVideoFrames(
+            path: liveSourcePath,
+            startMs: startMs,
+            endMs: videoEnd,
+          );
+          if (frames.isNotEmpty) {
+            videoAnalysis = await qwen.understandVideoFrames(
+              frames: frames,
+              sourceStartMs: startMs,
+              sourceEndMs: videoEnd,
+            );
+          }
         }
+      } catch (error) {
+        realtimeStatus = text(
+          '画面理解超时，继续使用实时音频…',
+          'Visual understanding timed out; continuing with realtime audio…',
+        );
+        notifyListeners();
       }
       MoodResult? mood;
       if (transcript.isNotEmpty) {
