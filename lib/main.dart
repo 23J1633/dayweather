@@ -997,63 +997,12 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// Automatically reaches the camera Wi-Fi path without requiring a manual
-  /// Android network switch. It first tries an already active camera Wi-Fi;
-  /// otherwise BLE discovery is used only to obtain the camera AP credentials,
-  /// after which the SDK connection is handed over to ConnectType.WIFI.
+  /// Connects through the camera Wi-Fi selected in Android system settings.
+  ///
+  /// GO Ultra is deliberately never connected through BLE. The system Wi-Fi
+  /// hand-off keeps the camera transport separate from MicPro's BLE channel.
   Future<void> connectCameraAutomatically() async {
-    if (connectionStage.isBusy || connectedDevice != null) return;
-    connectionStage = DeviceConnectionStage.connectingWifi;
-    connectionStatus = text(
-      '正在自动准备 GO Ultra 相机 Wi‑Fi…',
-      'Preparing the GO Ultra camera Wi‑Fi automatically…',
-    );
-    lastError = null;
-    previewReady = false;
-    notifyListeners();
-
-    try {
-      final direct = await native.connectCurrentWifiCamera();
-      if (direct != null) {
-        _markDeviceConnected(direct);
-        connectionStage = DeviceConnectionStage.connected;
-        connectionStatus = text(
-          '已通过相机 Wi‑Fi 连接，正在启动实时视频流…',
-          'Connected over camera Wi‑Fi; starting live video…',
-        );
-        _startAutoSync();
-        notifyListeners();
-        return;
-      }
-    } on PlatformException {
-      // The current network may be the internet Wi-Fi. Continue with the
-      // automatic camera discovery/bootstrap path below.
-    } catch (_) {
-      // Continue with camera discovery/bootstrap below.
-    }
-
-    connectionStage = DeviceConnectionStage.scanning;
-    connectionStatus = text(
-      '正在发现相机并准备 Wi‑Fi…',
-      'Discovering the camera and preparing Wi‑Fi…',
-    );
-    notifyListeners();
-    final discovered = await scanDevices();
-    final preferred = discovered
-        .where((item) => item.name.contains(preferredDeviceName))
-        .toList();
-    final target = preferred.isEmpty ? null : preferred.first;
-    if (target == null) {
-      _markConnectionFailed(
-        text(
-          '没有发现 GO Ultra，请确认相机已开机并处于可连接范围。',
-          'GO Ultra was not found; make sure it is powered on and nearby.',
-        ),
-      );
-      notifyListeners();
-      return;
-    }
-    await toggleDevice(target);
+    await connectCurrentWifiCamera();
   }
 
   Future<void> toggleDevice(DeviceRecord device) async {
@@ -1078,43 +1027,9 @@ class AppController extends ChangeNotifier {
       return;
     }
     if (connectionStage.isBusy) return;
-    connectingDeviceId = device.id;
-    connectionStage = DeviceConnectionStage.switchingWifi;
-    connectionStatus = text(
-      '正在准备 ${device.name} 的相机 Wi‑Fi…',
-      'Preparing camera Wi‑Fi for ${device.name}…',
-    );
-    lastError = null;
-    previewReady = false;
-    realtimeAudioFrames = 0;
-    realtimeAudioBytes = 0;
-    realtimeTranscript = '';
-    realtimeMood = '';
-    realtimeWeather = null;
-    realtimeStatus = text('等待实时音频流', 'Waiting for live audio');
-    notifyListeners();
-    try {
-      // BLE is only a bootstrap to obtain the camera AP settings; the camera
-      // session is handed over to Wi-Fi before media or preview work begins.
-      final connected = await native.connectGoUltra(device.id);
-      final connectedRecord =
-          connected ?? device.copyWith(connection: 'Wi‑Fi', isConnected: true);
-      _markDeviceConnected(connectedRecord);
-      connectionStatus = text(
-        '已连接 ${connectedRecord.name}，正在启动实时视频流…',
-        '${connectedRecord.name} connected; starting live stream…',
-      );
-      _startAutoSync();
-    } on PlatformException catch (error) {
-      final detail = error.message ?? error.code;
-      _markConnectionFailed(detail);
-    } catch (error) {
-      final detail = error.toString();
-      _markConnectionFailed(detail);
-    } finally {
-      connectingDeviceId = null;
-      notifyListeners();
-    }
+    // A scanned BLE identity is only informational. The actual camera session
+    // must always attach to the Wi-Fi network selected by Android.
+    await connectCurrentWifiCamera();
   }
 
   /// Runs the native handshake probe and surfaces the result in the UI, because
