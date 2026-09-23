@@ -159,6 +159,13 @@ class AppController extends ChangeNotifier {
   int? _lastRealtimeVideoSampleMs;
   int? _lastRealtimeIntensity;
   WeatherKind? _lastRealtimeWeather;
+  Future<void> _micProSyncQueue = Future<void>.value();
+
+  void _queueAutomaticMicProSync(WeatherNode node) {
+    _micProSyncQueue = _micProSyncQueue.then(
+      (_) => syncToMicPro(node, automatic: true),
+    );
+  }
 
   WeatherNode? get selectedNode => timeline.isEmpty
       ? null
@@ -622,26 +629,26 @@ class AppController extends ChangeNotifier {
           ],
         );
         if (mood == null) continue;
-        nodes.add(
-          WeatherNode(
-            startMs: start,
-            endMs: end,
-            kind: mood.kind,
-            mood: mood.mood,
-            confidence: mood.confidence,
-            evidence: mood.evidence,
-            transcript: textValue,
-            intensity: mood.intensity,
-            sourceRef: targetPath,
-            visualSummary: videoAnalysis?.summary,
-            absoluteStartMs: sourceRecordedAtMs == null
-                ? null
-                : sourceRecordedAtMs! + start,
-            absoluteEndMs: sourceRecordedAtMs == null
-                ? null
-                : sourceRecordedAtMs! + end,
-          ),
+        final node = WeatherNode(
+          startMs: start,
+          endMs: end,
+          kind: mood.kind,
+          mood: mood.mood,
+          confidence: mood.confidence,
+          evidence: mood.evidence,
+          transcript: textValue,
+          intensity: mood.intensity,
+          sourceRef: targetPath,
+          visualSummary: videoAnalysis?.summary,
+          absoluteStartMs: sourceRecordedAtMs == null
+              ? null
+              : sourceRecordedAtMs! + start,
+          absoluteEndMs: sourceRecordedAtMs == null
+              ? null
+              : sourceRecordedAtMs! + end,
         );
+        nodes.add(node);
+        _queueAutomaticMicProSync(node);
       }
       if (nodes.isEmpty) {
         throw StateError(
@@ -1193,8 +1200,24 @@ class AppController extends ChangeNotifier {
       notifyListeners();
       final shouldAnalyzeSyncedVideo =
           !automatic || (!realtimeAsrActive && !realtimeAsrConnecting);
-      if (isNew &&
+      final canUseRealtimeMediaWindows =
+          automatic &&
+          qwen.isConfigured &&
+          realtimeAudioFrames == 0 &&
+          !realtimeAsrActive &&
+          !realtimeAsrConnecting &&
+          !mediaWindowAnalysisRunning &&
           !isAnalyzing &&
+          mediaInfo?.hasAudio == true &&
+          mediaInfo?.hasVideo == true;
+      if (isNew &&
+          canUseRealtimeMediaWindows &&
+          _lastAutoAnalyzedPath != synced.path) {
+        _lastAutoAnalyzedPath = synced.path;
+        unawaited(_runMediaWindowAnalysis());
+      } else if (isNew &&
+          !isAnalyzing &&
+          !mediaWindowAnalysisRunning &&
           shouldAnalyzeSyncedVideo &&
           _lastAutoAnalyzedPath != synced.path) {
         _lastAutoAnalyzedPath = synced.path;
@@ -1441,6 +1464,12 @@ class AppController extends ChangeNotifier {
     if (data == null || data.isEmpty) return;
     realtimeAudioFrames += 1;
     realtimeAudioBytes += data.length;
+    if (realtimeAudioFrames == 1 &&
+        _realtimeAsr == null &&
+        !realtimeAsrConnecting &&
+        !mediaWindowAnalysisRunning) {
+      unawaited(_startRealtimeAnalysis());
+    }
     final timestamp = _number(
       event['timestampMs'] ?? event['timestamp'],
     ).round();
@@ -1572,6 +1601,7 @@ class AppController extends ChangeNotifier {
             timeline = [...timeline, node]
               ..sort((a, b) => a.startMs.compareTo(b.startMs));
             _liveRealtimeNodes = [..._liveRealtimeNodes, node];
+            _queueAutomaticMicProSync(node);
             realtimeMood = mood.mood;
             realtimeWeather = mood.kind;
           }
@@ -1635,11 +1665,18 @@ class AppController extends ChangeNotifier {
         realtimeAsrConnecting) {
       return;
     }
-    // The GO Ultra preview stream is video-only, so the realtime socket would sit
-    // idle until it times out. Analyze the synced media instead while no live audio
-    // is available, which yields real transcripts and mood results.
+    // The GO Ultra preview stream may be video-only. Use synced media on the tablet
+    // until an audio frame arrives, then let the real-time ASR path take over.
     if (realtimeAudioFrames == 0) {
-      unawaited(_runMediaWindowAnalysis());
+      if (sourcePath != null && mediaInfo != null) {
+        unawaited(_runMediaWindowAnalysis());
+      } else {
+        realtimeStatus = text(
+          '等待 GO Ultra 音频或最新同步素材…',
+          'Waiting for GO Ultra audio or the latest synced media…',
+        );
+        notifyListeners();
+      }
       return;
     }
     if (!qwen.isConfigured) {
@@ -1956,6 +1993,7 @@ class AppController extends ChangeNotifier {
         timeline = [...timeline, node]
           ..sort((a, b) => a.startMs.compareTo(b.startMs));
         _liveRealtimeNodes = [..._liveRealtimeNodes, node];
+        _queueAutomaticMicProSync(node);
       }
       final mappedEvents = visualEvents.map((event) {
         final relativeStart = (event.startMs - startMs).clamp(
@@ -2206,10 +2244,9 @@ class AppController extends ChangeNotifier {
   // endregion
 
   /// Sends the current mood to the Mic Pro.
-  /// Sends the current mood to the Mic Pro. When the protocol command codes are
-  /// available the card is pushed straight over BLE; otherwise it falls back to
-  /// the share sheet so the official Insta360 app can import it.
-  Future<void> syncToMicPro(WeatherNode node) async {
+  /// Automatic updates must stay silent and BLE-only; manual updates can still
+  /// offer the official app import fallback when direct command ids are unknown.
+  Future<void> syncToMicPro(WeatherNode node, {bool automatic = false}) async {
     syncMessage = text(
       '正在生成 240×208 状态卡…',
       'Generating a 240×208 status card…',
@@ -2218,6 +2255,23 @@ class AppController extends ChangeNotifier {
     try {
       final cardPath = await micPro.buildWallpaper(node: node, dark: darkMode);
       lastWallpaperPath = cardPath;
+      if (automatic &&
+          (micProConnectedAddress == null || micProConnectedAddress!.isEmpty)) {
+        syncMessage = text(
+          '情绪已记录；MicPro 当前未连接',
+          'Mood recorded; MicPro is not connected',
+        );
+        notifyListeners();
+        return;
+      }
+      if (automatic && micProCommandCodes.isEmpty) {
+        syncMessage = text(
+          '状态卡已生成；等待 MicPro 协议命令码',
+          'Status card generated; MicPro command ids are not configured yet',
+        );
+        notifyListeners();
+        return;
+      }
       // Prepare the on-device payloads the transmitter expects.
       final payloads = await micPro.preparePayloads(
         cardPath: cardPath,
@@ -2237,6 +2291,14 @@ class AppController extends ChangeNotifier {
       );
       if (pushed) {
         syncMessage = text('已推送到 Mic Pro 墨水屏', 'Pushed to the Mic Pro display');
+        notifyListeners();
+        return;
+      }
+      if (automatic) {
+        syncMessage = text(
+          '状态卡已生成，但 MicPro 蓝牙推送失败',
+          'Status card generated, but the MicPro BLE push failed',
+        );
         notifyListeners();
         return;
       }
