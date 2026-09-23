@@ -1,69 +1,171 @@
-# DayWeather
+# DayWeather · 一日心晴
 
-DayWeather 是一个面向 Insta360 GO Ultra 的 Flutter Android 原型：将影像、带时间戳的音频转写和情绪分析组织成一天的“天气曲线”，并提供精彩瞬间回放和 Mic Pro 状态卡分享。
+<p align="center">
+  <img src="assets/icon.png" width="112" alt="DayWeather 图标" />
+</p>
 
-完整的应用介绍、使用流程、安装说明、AI 配置、权限说明和常见问题见 [使用与介绍文档](使用与介绍文档.md)。已构建的开发者签名 APK 位于 `D:\Project\BoldMaker\outputs\dayweather-apks`。
+<p align="center">
+  <strong>把声音、画面和时间线，变成一张可回看的情绪天气图。</strong>
+</p>
 
-## 已实现
+<p align="center">
+  <a href="https://www.23j1633.xyz/portfolio/projects/DayWeather">查看完整项目介绍 ↗</a>
+  ·
+  <a href="https://b23.tv/avF5BhF">观看 B 站功能演示 ↗</a>
+</p>
 
-- 使用 `shadcn_flutter` 搭建天气、设备、我的三页主界面，以及明暗主题和中英文切换。
-- 应用启动图标、天气/事件/设备等少数重点视觉位置和 Mic Pro 状态卡主图使用 `assets/icon.png`；导航栏、操作按钮和通用设置项保持文字与状态动画，避免重复堆叠图标。源文件来自项目外的 `D:\Project\BoldMaker\icon\icon.png`，不会把 API Key 写入资源。
-- Android 原生桥接 Insta360 Android SDK 2.1.5：扫描时只保留 GO 系列、连接设备、预览视频流、读取媒体、按原始 PTS 抽取音频片段；连接流程会把 BLE、相机 Wi‑Fi、SDK Wi‑Fi、首帧和失败原因实时推送到 Flutter。
-- 设备页只展示真实扫描到的 GO 系列设备；没有真实设备时只显示空状态，不生成演示设备或伪造时间线。
-- Qwen 接入分层放在 `lib/services/qwen_service.dart`：ASR 使用支持 Base64 同步调用的 `qwen3-asr-flash`，情绪分析使用 `qwen3.8-max`，视频理解使用 `qwen3.8-omni-flash`。手动导入或离线分析会按 **3 分钟窗口**从原片首尾完整覆盖（`ceil(时长 / 3min)` 均分，末端自动收窄），抽取带原片偏移的真实 JPEG 关键帧和音频块；不会只分析视频开头。每个窗口的 `startMs/endMs` 会一直保留到转写、视频事件和精彩瞬间结果。
-- 精彩瞬间会在分析结束后**真实剪裁**成独立 MP4（原生 `MediaExtractor + MediaMuxer`，视频轨与音频轨同时裁剪，每段 60 秒），播放器优先加载剪裁产物；不是"把整段原片放上去"，也不只是存时间指针。
-- Mic Pro 状态卡按 240×208 像素生成，天气图形用**矢量绘制**（六色墨水屏无法显示彩色 emoji，矢量图形在 6 色量化后仍可辨识）；同时提供 On-device 的 4bpp 索引图（24960 B）与 240×240 六色 PNG 转换，以及基于 TRC 协议的 BLE 直连推送实现。
-- 连接成功后自动检查并同步 GO Ultra 最新视频，保留“立即同步”和手机手动导入/分析入口。实时链路会持续送入 Qwen ASR，并从 SDK 已渲染的 GO Ultra 预览流每 20 秒采样一帧；只在连续 3 分钟窗口结束后联合分析音频转写和实时画面。跨窗口末尾的 15 秒转写/画面会暂存到下一窗口，连接结束时再冲刷最后一个未完成窗口；预览帧暂时不可用时才回退到最近同步媒体。只有明显情绪变化或视频事件才写入天气曲线/事件记录。
-- 真实拍摄时间与播放器偏移分开保存：播放器使用媒体相对偏移定位，界面和历史记录优先使用 GO Ultra SDK 创建时间、媒体元数据或 GO Ultra 文件名中的拍摄时间；读取不到合法拍摄时间时显示相对偏移，不用当前时间伪造。
-- 分析结果以 JSON 形式持久化到应用本地 `SharedPreferences`，保留最近 20 次真实分析；首页“历史分析”可以恢复天气曲线、带时间戳转写对应的精彩瞬间和视频事件。GO Ultra 实时 ASR 的每个情绪节点也会持续更新并写入实时会话记录。
+> DayWeather 是一个面向 Insta360 GO Ultra 的 Flutter Android 应用原型。它将一天中的影像、带时间戳的音频转写与氛围分析组织成“天气曲线”，让拍下来的生活不再只停留在相册里。
 
-## 运行
+![DayWeather 首页](docs/images/home-screen.png)
+
+## 项目状态
+
+核心产品闭环已完成，当前仓库对应可运行、可演示、可复盘的 Android 原型版本：
+
+- 已完成 GO Ultra 设备连接、视频流预览、媒体同步与手动导入。
+- 已完成音频转写、视频理解、情绪天气曲线、视频事件与精彩瞬间回放。
+- 已完成 Mic Pro 状态卡生成、分享导入与 BLE 直连推送链路。
+- 已完成中英文切换、明暗主题、历史分析恢复和本地结果持久化。
+- 已通过 `flutter analyze`、`flutter test` 和 Android Debug 构建验证。
+
+## 产品展示
+
+### 功能演示
+
+下面直接嵌入 B 站播放器窗口：
+
+<div align="center">
+  <iframe src="https://player.bilibili.com/player.html?bvid=BV1Z5ht6sEX3&amp;page=1&amp;high_quality=1&amp;danmaku=0" scrolling="no" border="0" frameborder="no" framespacing="0" allowfullscreen="true" width="100%" height="480"></iframe>
+</div>
+
+如果当前 Markdown 平台不允许 iframe，请使用 [B 站原视频](https://b23.tv/avF5BhF) 打开观看。
+
+### 设备连接与实时影像流
+
+![设备连接、GO Ultra 实时预览与同步](docs/images/app-device-flow.jpg)
+
+### 分析结果与精彩瞬间
+
+![天气曲线、视频事件、转写和精彩瞬间](docs/images/analysis-results.jpg)
+
+### Mic Pro 状态卡
+
+![Mic Pro 六色墨水屏状态卡展示](docs/images/mic-pro-display.jpg)
+
+## 核心体验
+
+```text
+GO Ultra 拍摄
+      ↓
+连接相机 / 同步媒体 / 接入实时预览
+      ↓
+音频转写 + 视频理解 + 氛围分析
+      ↓
+天气曲线 + 时间戳证据 + 视频事件
+      ↓
+精彩瞬间回放 + Mic Pro 状态卡 + 历史记录
+```
+
+### 1. 把一天变成“影像天气”
+
+应用以天气隐喻呈现影像氛围：晴、多云、阴、雨、暴风和彩虹对应不同的情绪趋势。曲线中的每个节点都保留原片时间偏移，点击节点可以回到对应证据。
+
+### 2. 让 AI 结果有证据可回看
+
+音频转写、视频关键帧、情绪节点和视频事件都绑定真实的原片时间戳。精彩瞬间会被原生剪裁为独立 MP4，而不是只保存一个指针或重复播放整段原片。
+
+### 3. 从手机延伸到 Mic Pro
+
+DayWeather 会把当前影像天气生成 240×208 的 Mic Pro 状态卡，支持六色量化、系统分享导入，以及基于 TRC 协议的 BLE 直连推送，让情绪天气成为随身可见的设备状态。
+
+## 功能清单
+
+| 模块 | 已实现能力 |
+| --- | --- |
+| 影像接入 | Insta360 GO Ultra 扫描、相机 Wi‑Fi 连接、视频流预览、媒体列表、最新视频同步、手机导入 |
+| AI 分析 | Qwen ASR、视频理解、氛围/情绪趋势分析；按 3 分钟窗口覆盖完整素材 |
+| 天气曲线 | 晴/多云/阴/雨/暴风/彩虹状态、情绪强度、置信度、时间节点和证据查看 |
+| 回看系统 | 时间戳转写、视频事件、精彩瞬间、真实 MP4 裁剪、历史分析恢复 |
+| Mic Pro | 240×208 状态卡、4bpp 索引图、240×240 六色 PNG、分享导入、BLE 推送 |
+| 应用体验 | 中英文切换、明暗主题、权限与连接状态、隐私提示、本地历史记录 |
+
+## 技术实现
+
+- **客户端**：Flutter 3.x / Dart，使用 `shadcn_flutter` 构建界面。
+- **Android 原生桥接**：Kotlin + MethodChannel/EventChannel，对接 Insta360 Android SDK 2.1.5。
+- **媒体处理**：保留原始 PTS，按窗口抽取音频和关键帧，使用 `MediaExtractor + MediaMuxer` 裁剪精彩片段。
+- **AI 服务**：Qwen `qwen3-asr-flash`、`qwen3.8-max`、`qwen3.8-omni-flash`；实时链路使用流式 ASR。
+- **设备输出**：Mic Pro 六色图像生成、索引图转换和 TRC BLE 协议通信。
+- **本地存储**：使用 `SharedPreferences` 保存最近 20 次真实分析结果。
+
+## 运行项目
+
+### 环境要求
+
+- Flutter SDK，Dart SDK `^3.9.2`
+- Android API 29 或更高版本
+- Android 真机或模拟器
+- 如需真实 AI 分析，需要百炼 / DashScope API Key
+
+### 安装与启动
 
 ```powershell
 flutter pub get
 flutter run -d <device-id>
 ```
 
-真实分析必须配置百炼 API Key。按照 `OpenAI兼容接口连接文档.md`，本项目默认使用已验证的共享北京端点 `https://dashscope.aliyuncs.com/compatible-mode/v1`；推荐把本机密钥放在被忽略的 `.dart-define.local.json` 中，然后运行：
+建议将本机密钥放在被 Git 忽略的 `.dart-define.local.json` 中：
 
 ```powershell
 flutter run -d <device-id> --dart-define-from-file=.dart-define.local.json
 ```
 
-也可以直接使用 `--dart-define=DASHSCOPE_API_KEY=你的Key`。当前业务空间配置在 `lib/services/qwen_service.dart`，包含配置 ID `7379080`、北京兼容接口和 DashScope 接口地址。不要把真实 Key 写进可提交 Dart 文件、提交到 Git 或上传到 GitHub；`.gitignore` 已覆盖 `.env`、`.dart-define.local.json`、本地 secrets 文件和 Android 签名配置。
+也可以直接传入：
 
-## 调试设备约定
+```powershell
+flutter run -d <device-id> --dart-define=DASHSCOPE_API_KEY=你的Key
+```
 
-- 调试时优先使用当前在线的 Android 真机，并先用 `adb devices -l` 确认状态。
-- 真机不可用或掉线时，再回退到 Pixel 9 Pro 模拟器 `emulator-5554`。
+不要把真实 API Key 写入 Dart 文件、提交到 Git 或上传到公开仓库。
 
-## 已确认的测试设备
+## 构建与验证
 
-- 用户的 GO Ultra 设备名为 **`GO Ultra 5GQGMW`**，这是唯一属于本项目调试的真机相机；扫描列表中的其他 GO 设备（如 `GO 3S *`、`GO Ultra 5AMYUS`、`GO Ultra 5X848R` 等）都不是用户的设备，不要连接、不要同步它们的媒体。
+```powershell
+flutter analyze
+flutter test
+flutter build apk --debug
+```
 
-## Android / GO Ultra
+Debug APK 输出路径：
 
-Insta360 SDK 的私有 Maven 仓库配置位于 `android/build.gradle.kts`，应用最低 Android API 为 29。首次连接真实 GO Ultra 时，需要授予网络和媒体权限；平板先在 Android 系统 Wi‑Fi 设置中加入 GO Ultra 相机热点，应用随后将当前 Wi‑Fi 的 `Network.handle` 交给官方 SDK 的 `ConnectType.WIFI`，并绑定预览流。AI 请求通过独立的已验证移动数据网络发送，避免相机 Wi‑Fi 无互联网造成冲突。
+```text
+build/app/outputs/flutter-apk/app-debug.apk
+```
 
-设备页的“连接当前相机 Wi‑Fi”是主连接入口；BLE 扫描仅用于确认设备身份，不会自动触发 BLE 握手或要求 Action Pod 授权。真机或模拟器均只使用真实数据，不使用演示数据。
+首次连接真实 GO Ultra 时，需要按系统提示完成网络、相机 Wi‑Fi 和媒体权限配置。应用只会展示真实扫描到的 GO 系列设备，不生成演示设备或伪造天气曲线。
 
-## Mic Pro 说明
+## 目录说明
 
-官方公开使用路径是将自定义壁纸导入 Mic Pro；本项目因此生成 240×208 状态卡并打开系统分享面板，用户可选择 Insta360 App 完成导入。若后续获得官方直接写入接口，只需要替换 `MicProService` 的分享实现，UI 和图片生成逻辑可以复用。
+```text
+lib/
+├─ main.dart                    # 应用状态、分析流程与设备连接控制
+├─ pages.dart                   # 天气、设备、我的和设置页面
+├─ models.dart                  # 天气节点、事件、精彩片段、历史记录模型
+└─ services/
+   ├─ native_bridge.dart        # Flutter 与 Android 原生能力桥接
+   ├─ qwen_service.dart         # ASR、视频理解和氛围分析
+   └─ micpro_service.dart       # Mic Pro 状态卡生成
+assets/icon.png                 # 应用图标
+docs/images/                    # README 产品展示图
+```
 
-## 产物与验证
+## 相关链接
 
-- Debug APK：`build/app/outputs/flutter-apk/app-debug.apk`
-- `flutter analyze`：通过
-- `flutter test`：通过
-- `:app:assembleDebug`：通过
-- 当前验证约定：只把真实 HTTP 成功结果写入天气曲线、事件总结和精彩回放；接口失败时应用显示错误，不伪造分析结果。共享端点的模型连通性应以本地 `OpenAI兼容接口连接文档.md` 中的 API Key 为准。
-- 本次模拟器实测使用 `视频素材` 中第一条 10 分 23 秒实拍视频的完整时长压缩验证副本：程序拆成 11 个窗口并从 `00:00:00` 覆盖到结尾，视频理解、ASR 和 `qwen3.8-max` 均返回真实结果；天气曲线显示全片窗口，视频事件和精彩回放可回到原片偏移。拍摄时间从 `2026-09-22 15:15:22` 元数据/文件名得到并显示在素材卡和历史记录中。
-- 模拟器设置页的“测试 AI 连接”实测显示 `连接成功：OK`。验证过程中没有写入或提交 API Key；`build/` 下的 APK、验证切片和截图均为本地忽略产物。
-
-## 相关资料
-
-- [Insta360 GO Ultra Android SDK 2.1.5](../Reference/Android-SDK-2.1.5)
+- [DayWeather 完整项目介绍](https://www.23j1633.xyz/portfolio/projects/DayWeather)
+- [B 站功能演示视频](https://b23.tv/avF5BhF)
 - [Mic Pro 自定义壁纸说明](https://onlinemanual.insta360.com/micpro/zh-cn/camera/using-app/e-ink-display)
 - [阿里云百炼 OpenAI 兼容 Chat API](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)
 
+## 说明
+
+本项目为 BOLD MAKER 2026 智能影像挑战赛项目 **23J / DayWeather** 的已完成演示原型。应用中的 AI 分析结果依赖已配置的服务和网络环境；当接口失败时，应用会显示错误，不伪造分析结果。

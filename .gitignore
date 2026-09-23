@@ -54,3 +54,6 @@ app.*.map.json
 /android/key.properties
 lib/config/secrets.dart
 lib/**/qwen_key.dart
+
+# Demo videos are hosted externally and should not be committed to the repository.
+docs/media/*.mp4
