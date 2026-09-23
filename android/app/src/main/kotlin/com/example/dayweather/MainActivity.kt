@@ -12,9 +12,7 @@ import android.media.MediaMetadataRetriever
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.net.wifi.WifiManager
-import android.net.wifi.WifiNetworkSpecifier
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -27,22 +25,14 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
-import com.arashivision.inskmp.insble.data.BleDeviceCore
 import com.arashivision.sdk.camera.InstaCameraSDK
 import com.arashivision.sdk.camera.api.CameraDevice
-import com.arashivision.sdk.camera.api.param.listener.BleWakeUpListener
-import com.arashivision.sdk.camera.core.model.authorization.AuthorizationResult
-import com.arashivision.sdk.camera.core.model.authorization.AuthorizationOperationType
-import com.arashivision.sdk.camera.api.param.listener.AuthorizationListener
 import com.arashivision.sdk.camera.api.param.listener.CaptureStatusListener
 import com.arashivision.sdk.camera.api.param.listener.DisconnectListener
-import com.arashivision.sdk.camera.core.callback.BleScanCallback
-import com.arashivision.sdk.camera.core.model.CameraType
 import com.arashivision.sdk.camera.core.model.ConnectType
 import com.arashivision.sdk.camera.core.model.capture.CameraCaptureStatus
 import com.arashivision.sdk.camera.core.model.FunctionMode
 import com.arashivision.sdk.camera.core.model.option.SensorMode
-import com.arashivision.sdk.camera.core.model.option.WiFiData
 import com.arashivision.sdk.camera.api.preview.CameraStreamListener
 import com.arashivision.sdk.camera.api.preview.PreviewStreamFrame
 import com.arashivision.sdk.camera.api.preview.PreviewStreamParamsUpdate
@@ -77,7 +67,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -87,7 +76,6 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
-import kotlin.coroutines.resume
 
 class MainActivity : FlutterActivity() {
     companion object {
@@ -101,7 +89,6 @@ class MainActivity : FlutterActivity() {
     }
 
     private val mainScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val scannedDevices = linkedMapOf<String, BleDeviceCore>()
     private val connectivityManager by lazy {
         getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
     }
@@ -110,11 +97,9 @@ class MainActivity : FlutterActivity() {
     }
 
     private var currentCamera: CameraDevice? = null
-    private var scanCamera: CameraDevice? = null
     private var previewPlayer: InstaCapturePlayerView? = null
     private var previewStarted = false
     private var wifiNetwork: Network? = null
-    private var wifiCallback: ConnectivityManager.NetworkCallback? = null
     private var connectionJob: Job? = null
     private var eventSink: EventChannel.EventSink? = null
     private var aiEventSink: EventChannel.EventSink? = null
@@ -351,274 +336,6 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * Wakes a sleeping GO Ultra before connecting. The SDK expects the trailing 6
-     * characters of the serial, which is exactly what the BLE name exposes, so the
-     * common path does not require pressing the shutter on the Action Pod.
-     */
-    private fun wakeUpCamera(call: MethodCall, result: MethodChannel.Result) {
-        val deviceName = call.argument<String>("deviceName")
-        val cameraTypeName = call.argument<String>("cameraType") ?: "GO_ULTRA"
-        if (deviceName.isNullOrBlank()) {
-            result.error("WAKE_NAME_EMPTY", "A device name is required to wake the camera", null)
-            return
-        }
-        val cameraType = runCatching { CameraType.valueOf(cameraTypeName) }
-            .getOrDefault(CameraType.GO_ULTRA)
-        val ble = CameraDevice.get(ConnectType.BLE)
-        val finished = java.util.concurrent.atomic.AtomicBoolean(false)
-        fun finish(ok: Boolean, detail: String?) {
-            if (!finished.compareAndSet(false, true)) return
-            runOnUiThread {
-                if (ok) {
-                    emitNativeEvent("wake_up_success")
-                    result.success(null)
-                } else {
-                    emitNativeEvent("wake_up_failed", detail)
-                    result.error("WAKE_UP_FAILED", detail ?: "Camera wake up failed", null)
-                }
-            }
-        }
-        diagLog("wakeUp: invoke type=$cameraType name=$deviceName")
-        ble.bleWakeUp(
-            cameraType,
-            deviceName,
-            object : BleWakeUpListener {
-                override fun onWakeUpSuccess() {
-                    diagLog("wakeUp: success")
-                    finish(true, null)
-                }
-
-                override fun onWakeUpError(errCode: Int) {
-                    diagLog("wakeUp: error code=$errCode")
-                    finish(false, "wake up error code=$errCode")
-                }
-            },
-        )
-        mainScope.launch {
-            kotlinx.coroutines.delay(15_000L)
-            if (finished.compareAndSet(false, true)) {
-                runCatching { ble.release() }
-                runOnUiThread {
-                    diagLog("wakeUp: timeout after 15s"); emitNativeEvent("wake_up_failed", "timeout")
-                    result.error("WAKE_UP_TIMEOUT", "Camera did not respond to wake up", null)
-                }
-            }
-        }
-    }
-
-    /** Introspects the scanned device so the wake-up API can receive a serial. */
-    private fun dumpBleDeviceFields(result: MethodChannel.Result) {
-        val device = scannedDevices.values.firstOrNull()
-        if (device == null) {
-            result.error("NO_DEVICE", "Scan first so a device is available", null)
-            return
-        }
-        val info = linkedMapOf<String, Any?>()
-        info["className"] = device.javaClass.name
-        for (method in device.javaClass.methods) {
-            if (method.parameterCount != 0) continue
-            val name = method.name
-            if (name.startsWith("get") || name.startsWith("is")) {
-                if (name == "getClass") continue
-                val value = runCatching { method.invoke(device) }.getOrNull()
-                info[name] = value?.toString()
-            }
-        }
-        result.success(info)
-    }
-
-    /**
-     * GO Ultra and GO 3S require an explicit BLE authorization: the camera shows a
-     * prompt on the Action Pod and the app must listen for the result. Without this
-     * step the handshake fails with "wake up authorization failed".
-     */
-    private fun requestBleAuthorization(result: MethodChannel.Result) {
-        // Before the Wi-Fi hand-off the BLE scan camera is the only live SDK handle.
-        // Using currentCamera here made the pre-connect authorization request a
-        // guaranteed no-op because currentCamera is assigned only after Wi-Fi works.
-        // A failed BLE handshake is followed by releaseCamera(), so both live
-        // references may be cleared before the Dart recovery path asks for auth.
-        // Reuse the SDK BLE singleton in that case; checkAuthorization() is the
-        // official SDK entry point that can surface the Action Pod prompt.
-        val camera = currentCamera ?: scanCamera ?: CameraDevice.get(ConnectType.BLE).also {
-            scanCamera = it
-        }
-        mainScope.launch {
-            runCatching {
-                camera.registerAuthorizationListener(authorizationListener)
-                // The result also arrives through the listener; this call kicks off
-                // the camera-side prompt on the Action Pod.
-                camera.checkAuthorization().getOrThrow()
-            }.onSuccess { status ->
-                emitNativeEvent("authorization_requested", detail = status.toString())
-                result.success(status.toString())
-            }.onFailure { error ->
-                emitNativeEvent("authorization_failed", error.message)
-                result.error("AUTHORIZATION_FAILED", error.message, null)
-            }
-        }
-    }
-
-    /** Surfaces the camera-side authorization outcome to Flutter. */
-    private val authorizationListener = object : AuthorizationListener {
-        override fun onAuthorizationResult(
-            operationType: AuthorizationOperationType,
-            authorizationResult: AuthorizationResult,
-        ) {
-            emitNativeEvent(
-                "authorization_result",
-                detail = "$operationType/$authorizationResult",
-            )
-        }
-    }
-
-    /**
-     * Runs the BLE handshake step by step and reports which stage fails, so the
-     * wake-up requirement can be diagnosed without relying on device logcat.
-     */
-    private fun connectProbe(call: MethodCall, result: MethodChannel.Result) {
-        val id = call.argument<String>("id")
-        val device = scannedDevices[id]
-        if (device == null) {
-            result.error("NO_DEVICE", "Scan first, then probe the same id", null)
-            return
-        }
-        mainScope.launch {
-            val steps = linkedMapOf<String, Any?>()
-            steps["deviceName"] = device.name.toString()
-            steps["address"] = device.address
-            val ble = CameraDevice.get(ConnectType.BLE)
-            val outcomes = mutableListOf<String>()
-            runCatching { ble.connect(device, false).getOrThrow() }
-                .onSuccess { outcomes += "ble=OK" }
-                .onFailure { outcomes += "ble=FAIL(${it.message})" }
-            runCatching {
-                val wifi = ble.system.fetchWifiData().getOrNull()
-                outcomes += "wifiMode=${wifi?.mode}"
-                if (wifi?.mode == WiFiData.Mode.AP) {
-                    val creds = ble.system.getWifiData().getOrNull()
-                    outcomes += "ssid=${creds?.ssid}"
-                }
-            }.onFailure { outcomes += "wifiData=FAIL(${it.message})" }
-            runCatching { ble.release() }
-            steps["outcomes"] = outcomes
-            runOnUiThread { result.success(steps) }
-        }
-    }
-
-    private fun scanGoUltra(result: MethodChannel.Result) {
-        emitNativeEvent("scan_started")
-        scannedDevices.clear()
-        scanCamera?.stopScan()
-        val camera = CameraDevice.get(ConnectType.BLE)
-        scanCamera = camera
-        var finished = false
-        camera.scan(
-            8_000L,
-            object : BleScanCallback {
-                override fun onStarted() = Unit
-
-                override fun onScanning(bleDevice: BleDeviceCore) {
-                    val name = bleDevice.name.toString()
-                    if (name.contains("GO", ignoreCase = true)) {
-                        // BLE controllers rotate random addresses, so the same camera can
-                        // be reported repeatedly. Collapse entries that share a name and
-                        // drop the stale address mapping to keep the list trustworthy.
-                        val duplicateAddresses = scannedDevices
-                            .filterValues { it.name.toString() == name && it.address != bleDevice.address }
-                            .keys
-                        duplicateAddresses.forEach { scannedDevices.remove(it) }
-                        scannedDevices[bleDevice.address] = bleDevice
-                    }
-                }
-
-                override fun onFinished(bleDeviceList: List<BleDeviceCore>) {
-                    if (finished) return
-                    finished = true
-                    bleDeviceList
-                        .filter { it.name.toString().contains("GO", ignoreCase = true) }
-                        .forEach { device ->
-                            val name = device.name.toString()
-                            val duplicateAddresses = scannedDevices
-                                .filterValues { it.name.toString() == name && it.address != device.address }
-                                .keys
-                            duplicateAddresses.forEach { scannedDevices.remove(it) }
-                            scannedDevices[device.address] = device
-                        }
-                    emitNativeEvent(
-                        "scan_finished",
-                        extra = mapOf("count" to scannedDevices.size),
-                    )
-                    result.success(scannedDevices.values.map(::deviceMap))
-                }
-
-                override fun onError(throwable: Throwable) {
-                    if (finished) return
-                    finished = true
-                    emitNativeEvent("scan_failed", throwable.message)
-                    result.error("BLE_SCAN_FAILED", throwable.message, null)
-                }
-            },
-        )
-    }
-
-    private fun connectGoUltra(call: MethodCall, result: MethodChannel.Result) {
-        val id = call.argument<String>("id")
-        val bleDevice = scannedDevices[id]
-        if (bleDevice == null) {
-            result.error("DEVICE_NOT_FOUND", "The selected GO Ultra is no longer in the scan list", null)
-            return
-        }
-        connectionJob?.cancel()
-        releaseCamera(cancelConnectionJob = false)
-        currentDeviceId = id
-        currentDeviceName = bleDevice.name.toString()
-        currentDeviceAddress = bleDevice.address
-        connectionJob = mainScope.launch {
-            try {
-                connectBleThenWifi(bleDevice)
-                emitNativeEvent(
-                    "connected",
-                    extra = mapOf(
-                        "deviceId" to (currentDeviceId ?: id),
-                        "deviceName" to (currentDeviceName ?: bleDevice.name.toString()),
-                    ),
-                )
-                result.success(deviceMapForCamera())
-            } catch (error: CancellationException) {
-                runCatching { releaseCamera(cancelConnectionJob = false) }
-                result.error("CONNECT_CANCELLED", "GO Ultra connection was cancelled", null)
-            } catch (error: Throwable) {
-                val detail = connectionErrorMessage(error)
-                emitNativeEvent("connection_failed", detail)
-                val needsBleAuthorization = detail.contains("authorization", ignoreCase = true)
-                if (needsBleAuthorization) {
-                    // Keep the failed BLE session alive long enough for the
-                    // official checkAuthorization() recovery call to reach the
-                    // Action Pod. The next connect attempt releases it normally.
-                    stopPreview()
-                    flushPendingAudioFrame()
-                    currentCamera?.let { camera ->
-                        suppressDisconnectEvent = true
-                        runCatching { camera.unregisterDisconnectListener(disconnectListener) }
-                        runCatching { camera.release() }
-                    }
-                    currentCamera = null
-                    connectivityManager.bindProcessToNetwork(null)
-                    unregisterWifiCallback()
-                    wifiNetwork = null
-                    diagLog("connect: retaining BLE handle for authorization recovery")
-                } else {
-                    runCatching { releaseCamera(cancelConnectionJob = false) }
-                }
-                result.error("CONNECT_FAILED", detail, null)
-            } finally {
-                connectionJob = null
-            }
-        }
-    }
-
-    /**
      * Connects the SDK directly to the Wi-Fi network the tablet is already using.
      *
      * This is the primary camera path for DayWeather: the tablet joins the GO
@@ -706,115 +423,6 @@ class MainActivity : FlutterActivity() {
             .orEmpty()
     }
 
-    private fun connectionErrorMessage(error: Throwable): String {
-        val raw = error.message?.trim().orEmpty()
-        val normalized = raw.lowercase()
-        return if (
-            normalized.contains("wake up authorization") ||
-                normalized.contains("authorization failed")
-        ) {
-            "GO Ultra 尚未完成相机端授权，请在 Action Pod 上点击确认或按快门授权后重试（SDK：$raw）"
-        } else {
-            raw.ifBlank { "Unable to connect to GO Ultra" }
-        }
-    }
-
-    private suspend fun connectBleThenWifi(bleDevice: BleDeviceCore) {
-        val bleCamera = CameraDevice.get(ConnectType.BLE)
-        scanCamera = bleCamera
-        emitNativeEvent("connecting_ble", deviceName = bleDevice.name.toString())
-        diagLog("ble.connect start name=${bleDevice.name} addr=${bleDevice.address}")
-        // Use BLE only as a short control bootstrap. The production transport
-        // remains the camera Wi-Fi Network handed to ConnectType.WIFI below.
-        bleCamera.connect(bleDevice, true)
-            .onSuccess { diagLog("ble.connect OK") }
-            .onFailure { diagLog("ble.connect FAIL: ${it.message}") }
-            .getOrThrow()
-        emitNativeEvent("ble_connected", deviceName = bleDevice.name.toString())
-        diagLog("ap mode: enter")
-        val wifiData = ensureCameraApMode(bleCamera)
-            ?: error("GO Ultra did not provide Wi-Fi credentials")
-        emitNativeEvent(
-            "requesting_wifi",
-            deviceName = bleDevice.name.toString(),
-            extra = mapOf("ssid" to wifiData.ssid),
-        )
-        val network = requestCameraWifi(wifiData.ssid, wifiData.pwd)
-            ?: error("Android did not grant a temporary camera Wi-Fi network")
-        wifiNetwork = network
-        if (!connectivityManager.bindProcessToNetwork(network)) {
-            error("Android could not bind the camera Wi-Fi network")
-        }
-        emitNativeEvent("wifi_available", deviceName = bleDevice.name.toString())
-        runCatching { bleCamera.release() }
-        val wifiCamera = CameraDevice.get(ConnectType.WIFI)
-        emitNativeEvent("connecting_wifi", deviceName = bleDevice.name.toString())
-        diagLog("wifi.connect start handle=${network.networkHandle}")
-        wifiCamera.connect(network.networkHandle)
-            .onSuccess { diagLog("wifi.connect OK") }
-            .onFailure { diagLog("wifi.connect FAIL: ${it.message}") }
-            .getOrThrow()
-        currentCamera = wifiCamera
-        wifiCamera.registerDisconnectListener(disconnectListener)
-        // Register right after connecting so recordings started from the Action Pod
-        // shutter are observed as well, mirroring the official demo lifecycle.
-        runCatching { wifiCamera.capture.registerCaptureStatusListener(captureStatusListener) }
-        emitNativeEvent("camera_ready", deviceName = bleDevice.name.toString())
-        startPreview()
-    }
-
-    private suspend fun ensureCameraApMode(camera: CameraDevice): com.arashivision.sdk.camera.core.model.option.WiFiData? {
-        val current = camera.system.fetchWifiData().getOrNull()
-        if (current?.mode == WiFiData.Mode.AP) return camera.system.getWifiData().getOrNull()
-        emitNativeEvent("switching_ap")
-        camera.system.setWifiMode(WiFiData.Mode.AP, "").getOrThrow()
-        repeat(12) {
-            val data = camera.system.fetchWifiData().getOrNull()
-            if (data?.mode == WiFiData.Mode.AP) return camera.system.getWifiData().getOrNull()
-            delay(500)
-        }
-        error("GO Ultra did not enter AP Wi-Fi mode")
-    }
-
-    private suspend fun requestCameraWifi(ssid: String, password: String): Network? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
-        if (!wifiManager.isWifiEnabled) return null
-        unregisterWifiCallback()
-        val specifier = WifiNetworkSpecifier.Builder()
-            .setSsid(ssid)
-            .setWpa2Passphrase(password)
-            .build()
-        val request = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-            .setNetworkSpecifier(specifier)
-            .build()
-        return suspendCancellableCoroutine { continuation ->
-            var resumed = false
-            fun finish(network: Network?) {
-                if (resumed) return
-                resumed = true
-                if (continuation.isActive) continuation.resume(network)
-            }
-            val callback = object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    wifiCallback = this
-                    finish(network)
-                }
-
-                override fun onUnavailable() = finish(null)
-
-                override fun onLost(network: Network) {
-                    if (network == wifiNetwork) finish(null)
-                }
-            }
-            wifiCallback = callback
-            connectivityManager.requestNetwork(request, callback)
-            continuation.invokeOnCancellation {
-                runCatching { connectivityManager.unregisterNetworkCallback(callback) }
-            }
-        }
-    }
-
     private fun releaseCamera(cancelConnectionJob: Boolean = true) {
         if (cancelConnectionJob) {
             connectionJob?.cancel()
@@ -822,7 +430,6 @@ class MainActivity : FlutterActivity() {
         }
         stopPreview()
         flushPendingAudioFrame()
-        runCatching { scanCamera?.stopScan() }
         currentCamera?.let { camera ->
             suppressDisconnectEvent = true
             runCatching { camera.unregisterDisconnectListener(disconnectListener) }
@@ -831,15 +438,12 @@ class MainActivity : FlutterActivity() {
         aiWebSocket = null
         synchronized(aiClients) { aiClients.clear() }
         runCatching { currentCamera?.release() }
-        runCatching { scanCamera?.release() }
         currentCamera = null
-        scanCamera = null
         currentDeviceId = null
         currentDeviceName = null
         currentDeviceAddress = null
         suppressDisconnectEvent = false
         connectivityManager.bindProcessToNetwork(null)
-        unregisterWifiCallback()
         wifiNetwork = null
     }
 
@@ -1037,11 +641,6 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun unregisterWifiCallback() {
-        wifiCallback?.let { callback -> runCatching { connectivityManager.unregisterNetworkCallback(callback) } }
-        wifiCallback = null
-    }
-
     private fun deviceModel(name: String): String = when {
         name.contains("GO Ultra", ignoreCase = true) -> "GO Ultra"
         name.contains("GO 3S", ignoreCase = true) -> "GO 3S"
@@ -1049,18 +648,6 @@ class MainActivity : FlutterActivity() {
         name.contains("GO 2", ignoreCase = true) -> "GO 2"
         name.contains("GO", ignoreCase = true) -> "GO"
         else -> "Unknown"
-    }
-
-    private fun deviceMap(bleDevice: BleDeviceCore): Map<String, Any?> {
-        val name = bleDevice.name.toString()
-        return mapOf(
-        "id" to bleDevice.address,
-        "name" to name,
-        "model" to deviceModel(name),
-        "connection" to "BLE / Wi‑Fi",
-        "isConnected" to false,
-        "address" to bleDevice.address,
-        )
     }
 
     private fun deviceMapForCamera(): Map<String, Any?> {

@@ -1020,22 +1020,6 @@ class AppController extends ChangeNotifier {
     await connectCurrentWifiCamera();
   }
 
-  /// Runs the native handshake probe and surfaces the result in the UI, because
-  /// Huawei tablets hide application logcat output.
-  Future<void> runConnectProbe(DeviceRecord device) async {
-    connectionStatus = text('正在诊断 BLE 握手…', 'Probing the BLE handshake…');
-    notifyListeners();
-    try {
-      final probe = await native.connectProbe(device.id);
-      final outcomes =
-          (probe['outcomes'] as List?)?.join(' | ') ?? probe.toString();
-      connectionStatus = text('探针：$outcomes', 'Probe: $outcomes');
-    } catch (error) {
-      connectionStatus = text('探针失败：$error', 'Probe failed: $error');
-    }
-    notifyListeners();
-  }
-
   /// True while the camera is recording (started in-app or from the shutter).
   bool recordingActive = false;
   int recordingElapsedMs = 0;
