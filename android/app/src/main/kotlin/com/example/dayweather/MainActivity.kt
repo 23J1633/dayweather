@@ -345,7 +345,9 @@ class MainActivity : FlutterActivity() {
     private fun connectCurrentWifiCamera(result: MethodChannel.Result) {
         connectionJob?.cancel()
         releaseCamera(cancelConnectionJob = false)
-        val network = currentWifiNetwork()
+        // Follow the SDK demo's Wi-Fi entry point: use the ordinary wlan0 STA
+        // network handle and let CameraDevice perform the camera handshake.
+        val network = sdkWlan0Network()
         if (network == null) {
             result.error(
                 "WIFI_NOT_CONNECTED",
@@ -403,16 +405,19 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun currentWifiNetwork(): Network? {
-        val active = connectivityManager.activeNetwork
-        if (active != null && isWifiNetwork(active)) return active
-        return connectivityManager.allNetworks.firstOrNull(::isWifiNetwork)
-    }
-
-    private fun isWifiNetwork(network: Network): Boolean {
-        val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
-        return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-    }
+    /** Matches Android-SDK-2.1.5's getWlan0NetworkId implementation. */
+    private fun sdkWlan0Network(): Network? = runCatching {
+        connectivityManager.allNetworks.firstOrNull { network ->
+            val capabilities = connectivityManager.getNetworkCapabilities(network)
+                ?: return@firstOrNull false
+            if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                return@firstOrNull false
+            }
+            connectivityManager.getLinkProperties(network)?.interfaceName == "wlan0"
+        }
+    }.onFailure {
+        diagLog("sdk wlan0 network lookup failed: ${it.message}")
+    }.getOrNull()
 
     private fun currentWifiSsid(): String {
         return wifiManager.connectionInfo?.ssid
