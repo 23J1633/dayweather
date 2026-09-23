@@ -1511,7 +1511,6 @@ class AppController extends ChangeNotifier {
       final sourceStart = sourceRecordedAtMs;
       final windows = math.max(1, (duration / realtimeAnalysisWindowMs).ceil());
       for (var index = 0; index < windows; index++) {
-        if (!connectionIsActive && !previewReady) break;
         final startMs = index * realtimeAnalysisWindowMs;
         final endMs = math.min(duration, startMs + realtimeAnalysisWindowMs);
         if (endMs <= startMs) break;
