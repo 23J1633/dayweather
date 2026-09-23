@@ -159,6 +159,7 @@ class AppController extends ChangeNotifier {
   int? _lastRealtimeVideoSampleMs;
   int? _lastRealtimeIntensity;
   WeatherKind? _lastRealtimeWeather;
+  String? _lastRealtimeMood;
   Future<void> _micProSyncQueue = Future<void>.value();
 
   void _queueAutomaticMicProSync(WeatherNode node) {
@@ -1776,6 +1777,7 @@ class AppController extends ChangeNotifier {
     _lastRealtimeVideoSampleMs = null;
     _lastRealtimeIntensity = null;
     _lastRealtimeWeather = null;
+    _lastRealtimeMood = null;
   }
 
   void _handleRealtimeTranscript(RealtimeTranscript result) {
@@ -1939,15 +1941,21 @@ class AppController extends ChangeNotifier {
         );
       }
       final visualEvents = videoAnalysis?.events ?? const <VideoEvent>[];
+      final moodChanged =
+          mood != null &&
+          (_lastRealtimeMood == null ||
+              mood.mood != _lastRealtimeMood ||
+              mood.kind != _lastRealtimeWeather);
       final moodIsNotable =
           mood != null &&
-          (_lastRealtimeIntensity == null
-              ? mood.intensity >= 65 ||
-                    mood.kind == WeatherKind.storm ||
-                    mood.kind == WeatherKind.rainbow
-              : (mood.intensity - _lastRealtimeIntensity!).abs() >= 25 ||
-                    (mood.kind != _lastRealtimeWeather &&
-                        mood.intensity >= 50));
+          (moodChanged ||
+              (_lastRealtimeIntensity == null
+                  ? mood.intensity >= 65 ||
+                        mood.kind == WeatherKind.storm ||
+                        mood.kind == WeatherKind.rainbow
+                  : (mood.intensity - _lastRealtimeIntensity!).abs() >= 25 ||
+                        (mood.kind != _lastRealtimeWeather &&
+                            mood.intensity >= 50)));
       final hasNotableResult = moodIsNotable || visualEvents.isNotEmpty;
       if (mood == null && visualEvents.isEmpty) {
         realtimeStatus = text(
@@ -1959,6 +1967,7 @@ class AppController extends ChangeNotifier {
       if (mood != null) {
         _lastRealtimeIntensity = mood.intensity;
         _lastRealtimeWeather = mood.kind;
+        _lastRealtimeMood = mood.mood;
       }
       if (!hasNotableResult) {
         realtimeStatus = text(
