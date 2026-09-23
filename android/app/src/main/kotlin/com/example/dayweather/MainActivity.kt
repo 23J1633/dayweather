@@ -1988,6 +1988,12 @@ class MainActivity : FlutterActivity() {
                     bitmap = File(bitmapPath).readBytes(),
                     meta = File(metaPath).readBytes(),
                     codes = codes.mapValues { (it.value as Number).toInt() },
+                    onAuthorizationRequested = {
+                        emitNativeEvent(
+                            "micpro_authorization_requested",
+                            "Press the Mic Pro power button within 5 seconds",
+                        )
+                    },
                 )
             }.onSuccess {
                 diagLog("micpro: wallpaper pushed")
@@ -2320,6 +2326,7 @@ private class MicProPusher(private val context: android.content.Context) {
         private const val FILE_CHUNK_SIZE = 212
         private const val FILE_CHUNK_HEADER_SIZE = 2
         private const val ACK_TIMEOUT_MS = 3_000L
+        private const val AUTHORIZATION_TIMEOUT_MS = 5_000L
         private const val SEGMENT_SINGLE = 0x08
     }
 
@@ -2375,6 +2382,7 @@ private class MicProPusher(private val context: android.content.Context) {
         bitmap: ByteArray,
         meta: ByteArray,
         codes: Map<String, Int>,
+        onAuthorizationRequested: (() -> Unit)? = null,
     ) {
         val manager = context.getSystemService(android.content.Context.BLUETOOTH_SERVICE)
             as android.bluetooth.BluetoothManager
@@ -2415,6 +2423,8 @@ private class MicProPusher(private val context: android.content.Context) {
                 }
             }
 
+            authorize(g, write, codes, onAuthorizationRequested)
+
             // Phase 1 announces the bitmap, phase 2 delivers it, matching the
             // two-stage flow the official app uses.
             sendCommand(g, write, codes, "TRC_APP_CMD_READY_WALLPAPER", EMPTY_PAYLOAD)
@@ -2429,6 +2439,81 @@ private class MicProPusher(private val context: android.content.Context) {
     }
 
     private val EMPTY_PAYLOAD = ByteArray(0)
+
+    /**
+     * The official TRC flow requests authorization before sending business
+     * commands. On an untrusted connection the transmitter accepts GATT writes
+     * but silently drops them, so a successful write callback is not enough.
+     */
+    private fun authorize(
+        g: android.bluetooth.BluetoothGatt,
+        write: android.bluetooth.BluetoothGattCharacteristic,
+        codes: Map<String, Int>,
+        onAuthorizationRequested: (() -> Unit)?,
+    ) {
+        val getAuthorizeCode = codes["TRC_APP_CMD_GET_AUTHORIZE"]
+            ?: throw IllegalStateException("Missing Mic Pro authorization command code")
+        val notifyAuthorizeCode = codes["TRC_APP_CMD_NOTIFY_AUTHORIZE"]
+            ?: throw IllegalStateException("Missing Mic Pro authorization notification code")
+        check(getAuthorizeCode >= 0 && notifyAuthorizeCode >= 0) {
+            "Invalid Mic Pro authorization command code"
+        }
+
+        onAuthorizationRequested?.invoke()
+        val stateFrame = sendCommand(
+            g,
+            write,
+            codes,
+            "TRC_APP_CMD_GET_AUTHORIZE",
+            EMPTY_PAYLOAD,
+        )
+        when (authorizationState(stateFrame)) {
+            true -> return
+            false -> {
+                val deadline = SystemClock.uptimeMillis() + AUTHORIZATION_TIMEOUT_MS
+                val notification = awaitCommand(notifyAuthorizeCode, deadline)
+                if (notification == null || authorizationState(notification) != true) {
+                    throw IllegalStateException(
+                        "Mic Pro authorization timed out; press its power button within 5 seconds",
+                    )
+                }
+            }
+            null -> {
+                // Older firmware replies with a non-boolean payload. Keep the
+                // established flow compatible and let the next command decide.
+            }
+        }
+    }
+
+    /** Returns the first protobuf-like field when it is a boolean auth state. */
+    private fun authorizationState(frame: ByteArray): Boolean? {
+        if (frame.size < FRAME_HEADER_SIZE) return null
+        val payloadLength = readU16LittleEndian(frame, 5)
+        if (payloadLength <= 1 || frame.size < FRAME_HEADER_SIZE + payloadLength) return null
+        val payload = frame.copyOfRange(FRAME_HEADER_SIZE, FRAME_HEADER_SIZE + payloadLength)
+        if ((payload[0].toInt() and 0xFF) != 0x08) return null
+        return when (payload[1].toInt() and 0xFF) {
+            0 -> false
+            1 -> true
+            else -> null
+        }
+    }
+
+    private fun awaitCommand(command: Int, deadline: Long): ByteArray? {
+        while (true) {
+            val remaining = deadline - SystemClock.uptimeMillis()
+            if (remaining <= 0L) return null
+            val frame = acks.poll(remaining, java.util.concurrent.TimeUnit.MILLISECONDS)
+                ?: return null
+            if (frame.size >= FRAME_HEADER_SIZE && readU16LittleEndian(frame, 1) == command) {
+                return frame
+            }
+        }
+    }
+
+    private fun readU16LittleEndian(data: ByteArray, offset: Int): Int =
+        (data[offset].toInt() and 0xFF) or
+            ((data[offset + 1].toInt() and 0xFF) shl 8)
 
     /** Sends the file header (begin) then the payload split across 212-byte chunks. */
     private fun upload(
@@ -2468,7 +2553,7 @@ private class MicProPusher(private val context: android.content.Context) {
         codes: Map<String, Int>,
         name: String,
         payload: ByteArray,
-    ) {
+    ): ByteArray {
         val cmd = codes[name]
             ?: throw IllegalStateException("Missing command code for $name")
         if (payload.size > PACKET_SIZE - FRAME_HEADER_SIZE) {
@@ -2494,9 +2579,8 @@ private class MicProPusher(private val context: android.content.Context) {
         if (!g.writeCharacteristic(write)) {
             throw IllegalStateException("Failed to write $name")
         }
-        if (acks.poll(ACK_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS) == null) {
-            throw IllegalStateException("Timed out waiting for $name acknowledgement")
-        }
+        return acks.poll(ACK_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+            ?: throw IllegalStateException("Timed out waiting for $name acknowledgement")
     }
 }
 

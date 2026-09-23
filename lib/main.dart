@@ -1342,6 +1342,20 @@ class AppController extends ChangeNotifier {
       case 'authorization_failed':
         connectionStatus = text('授权失败', 'Authorization failed');
         lastError = event['detail']?.toString();
+      case 'micpro_authorization_requested':
+        micProStatus = text(
+          '请在 5 秒内按 Mic Pro 电源键授权',
+          'Press the Mic Pro power button within 5 seconds',
+        );
+        syncMessage = micProStatus;
+      case 'micpro_push_failed':
+        micProStatus = text(
+          'MicPro 推送失败：${event['detail'] ?? '未知错误'}',
+          'MicPro push failed: ${event['detail'] ?? 'unknown error'}',
+        );
+        syncMessage = micProStatus;
+      case 'micpro_pushed':
+        micProStatus = text('MicPro 已更新情绪图标', 'MicPro mood icon updated');
       case 'camera_ready':
         _markDeviceConnectedByEvent(deviceId, deviceName);
         connectionStage = DeviceConnectionStage.connected;
@@ -2318,6 +2332,8 @@ class AppController extends ChangeNotifier {
   /// The frame uses 16-bit little-endian command ids. Keeping the names
   /// identical to the native sender makes a failed protocol step actionable.
   Map<String, int> micProCommandCodes = <String, int>{
+    'TRC_APP_CMD_GET_AUTHORIZE': 3,
+    'TRC_APP_CMD_NOTIFY_AUTHORIZE': 4,
     'TRC_APP_CMD_READY_WALLPAPER': 33,
     'TRC_APP_CMD_GET_WALLPAPER': 34,
     'APP_CMD_WRITE_FILE_BEGIN': 40,
