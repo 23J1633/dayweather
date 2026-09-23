@@ -908,61 +908,30 @@ class AppController extends ChangeNotifier {
   Future<List<DeviceRecord>> scanDevices() async {
     scanning = true;
     connectionStage = DeviceConnectionStage.scanning;
-    connectionStatus = text('正在扫描真实 GO 设备…', 'Scanning real GO devices…');
+    connectionStatus = text(
+      '正在检查当前 Wi‑Fi 上的 GO Ultra…',
+      'Checking for GO Ultra on the current Wi‑Fi…',
+    );
     notifyListeners();
     try {
-      final discovered = await native.scanGoUltra();
-      final connectedId = connectedDevice?.id;
-      devices = discovered
-          .map(
-            (device) => device.copyWith(isConnected: device.id == connectedId),
-          )
-          .toList();
+      await connectCurrentWifiCamera(allowWhileScanning: true);
+      final discovered = List<DeviceRecord>.from(devices);
       analysisMessage = discovered.isNotEmpty
           ? text(
-              '发现 ${discovered.length} 台真实 GO 系列设备',
-              '${discovered.length} real GO-series device(s) found',
+              '已在当前 Wi‑Fi 上发现 GO Ultra',
+              'GO Ultra found on the current Wi‑Fi',
             )
-          : text('未发现真实 GO Ultra 设备', 'No real GO Ultra device found');
-      if (connectedId == null) {
-        connectionStage = DeviceConnectionStage.idle;
-        connectionStatus = text('等待连接 GO Ultra', 'Waiting for GO Ultra');
-      }
-      // Keep the project camera first, then auto-connect it: the common path
-      // should never require hunting through the scan list.
-      final remembered = _lastDeviceName;
-      final hasPreferred = devices.any(
-        (item) => item.name.contains(preferredDeviceName),
-      );
-      if (hasPreferred) {
-        final preferred = devices
-            .where((item) => item.name.contains(preferredDeviceName))
-            .toList();
-        devices = [
-          ...preferred,
-          ...devices.where((item) => !preferred.contains(item)),
-        ];
-      } else if (remembered != null && remembered.isNotEmpty) {
-        final preferred = devices
-            .where((item) => item.name == remembered)
-            .toList();
-        if (preferred.isNotEmpty) {
-          devices = [
-            ...preferred,
-            ...devices.where((item) => item.name != remembered),
-          ];
-        }
-      }
+          : text(
+              '当前 Wi‑Fi 不是 GO Ultra 相机网络',
+              'The current Wi‑Fi is not a GO Ultra camera network',
+            );
       scanning = false;
       notifyListeners();
       return discovered;
     } catch (error) {
       scanning = false;
       connectionStage = DeviceConnectionStage.failed;
-      connectionStatus = text(
-        '扫描失败，请检查蓝牙权限',
-        'Scan failed; check Bluetooth permission',
-      );
+      connectionStatus = text('Wi‑Fi 检查失败', 'Wi‑Fi check failed');
       lastError = error.toString();
       notifyListeners();
       return <DeviceRecord>[];
@@ -971,9 +940,13 @@ class AppController extends ChangeNotifier {
 
   /// Connects through the Wi-Fi network already selected by Android.
   ///
-  /// The camera transport is Wi-Fi; BLE scanning remains a discovery aid only.
-  Future<void> connectCurrentWifiCamera() async {
-    if (connectionStage.isBusy || connectedDevice != null) return;
+  /// Camera discovery and connection never use Bluetooth. Bluetooth is reserved
+  /// for the independent Mic Pro channel.
+  Future<void> connectCurrentWifiCamera({bool allowWhileScanning = false}) async {
+    if ((!allowWhileScanning && connectionStage.isBusy) ||
+        connectedDevice != null) {
+      return;
+    }
     connectionStage = DeviceConnectionStage.connectingWifi;
     connectionStatus = text(
       '正在使用当前 Wi‑Fi 连接 GO Ultra…',

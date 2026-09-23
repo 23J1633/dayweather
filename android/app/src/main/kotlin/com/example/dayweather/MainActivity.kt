@@ -289,12 +289,17 @@ class MainActivity : FlutterActivity() {
 
     private fun handleMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
-            "scanGoUltra" -> scanGoUltra(result)
-            "wakeUpCamera" -> wakeUpCamera(call, result)
-            "connectProbe" -> connectProbe(call, result)
-            "requestBleAuthorization" -> requestBleAuthorization(result)
-            "dumpBleDeviceFields" -> dumpBleDeviceFields(result)
-            "connectGoUltra" -> connectGoUltra(call, result)
+            "scanGoUltra",
+            "wakeUpCamera",
+            "connectProbe",
+            "requestBleAuthorization",
+            "dumpBleDeviceFields",
+            "connectGoUltra",
+            -> result.error(
+                "CAMERA_BLE_DISABLED",
+                "GO Ultra must be connected over Wi-Fi; Bluetooth is reserved for Mic Pro",
+                null,
+            )
             "connectCurrentWifiCamera" -> connectCurrentWifiCamera(result)
             "disconnectCamera" -> {
                 releaseCamera()
