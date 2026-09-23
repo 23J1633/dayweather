@@ -1637,6 +1637,7 @@ class AppController extends ChangeNotifier {
         events: _liveRealtimeEvents,
         durationMs: mediaInfo?.durationMs,
       );
+      await _exportHighlightClips(path);
       realtimeStatus = text(
         '素材分析完成：已生成真实天气曲线',
         'Media analysis finished: real weather curve ready',
@@ -2025,6 +2026,12 @@ class AppController extends ChangeNotifier {
         events: videoEvents,
         sourceDurationMs: mediaInfo?.durationMs,
       );
+      if (liveSourcePath != null &&
+          liveSourcePath.isNotEmpty &&
+          mediaInfo?.hasVideo == true &&
+          highlights.isNotEmpty) {
+        await _exportHighlightClips(liveSourcePath);
+      }
       if (timeline.isNotEmpty) selectedNodeIndex = timeline.length - 1;
       await _storeHistorySnapshot(
         id: _liveHistoryId ?? 'live-${DateTime.now().millisecondsSinceEpoch}',
