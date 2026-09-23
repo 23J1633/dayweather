@@ -10,9 +10,11 @@ import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.MediaMetadataRetriever
 import android.net.ConnectivityManager
+import android.net.NetworkRequest
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
+import android.net.wifi.WifiNetworkSpecifier
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -100,6 +102,7 @@ class MainActivity : FlutterActivity() {
     private var previewPlayer: InstaCapturePlayerView? = null
     private var previewStarted = false
     private var wifiNetwork: Network? = null
+    private var systemWifiNetworkCallback: ConnectivityManager.NetworkCallback? = null
     private var connectionJob: Job? = null
     private var eventSink: EventChannel.EventSink? = null
     private var aiEventSink: EventChannel.EventSink? = null
@@ -130,6 +133,7 @@ class MainActivity : FlutterActivity() {
     private var pendingAudioTimestamp: Long? = null
     private var audioFrameCount = 0L
     private var audioByteCount = 0L
+    private val reportedPreviewStreamTypes = mutableSetOf<String>()
 
     /**
      * Huawei tablets hide application logcat output, so connection stages are also
@@ -256,12 +260,13 @@ class MainActivity : FlutterActivity() {
 
     private fun requestCameraPermissions() {
         val permissions = buildList {
+            // Android still gates WifiManager scanResults behind location access,
+            // including on Android 13+ where NEARBY_WIFI_DEVICES is granted.
+            add(Manifest.permission.ACCESS_FINE_LOCATION)
+            add(Manifest.permission.ACCESS_COARSE_LOCATION)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 add(Manifest.permission.BLUETOOTH_SCAN)
                 add(Manifest.permission.BLUETOOTH_CONNECT)
-            } else {
-                add(Manifest.permission.ACCESS_FINE_LOCATION)
-                add(Manifest.permission.ACCESS_COARSE_LOCATION)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 add(Manifest.permission.READ_MEDIA_VIDEO)
@@ -285,6 +290,8 @@ class MainActivity : FlutterActivity() {
                 "GO Ultra must be connected over Wi-Fi; Bluetooth is reserved for Mic Pro",
                 null,
             )
+            "scanCameraWifi" -> scanCameraWifi(result)
+            "connectCameraWifi" -> connectCameraWifi(call, result)
             "connectCurrentWifiCamera" -> connectCurrentWifiCamera(result)
             "disconnectCamera" -> {
                 releaseCamera()
@@ -335,12 +342,161 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    /** Scans nearby Wi-Fi from inside the app and returns only GO Ultra APs. */
+    private fun scanCameraWifi(result: MethodChannel.Result) {
+        mainScope.launch {
+            try {
+                val networks = withContext(Dispatchers.IO) {
+                    runCatching { wifiManager.startScan() }.getOrDefault(false)
+                    delay(1_500L)
+                    wifiManager.scanResults
+                        .asSequence()
+                        .map { scan ->
+                            mapOf(
+                                "ssid" to scan.SSID,
+                                "bssid" to scan.BSSID,
+                                "level" to scan.level,
+                                "frequency" to scan.frequency,
+                                "capabilities" to scan.capabilities,
+                            )
+                        }
+                        .filter { item ->
+                            val ssid = item["ssid"]?.toString().orEmpty()
+                            ssid.startsWith("GO Ultra", ignoreCase = true)
+                        }
+                        .distinctBy { item -> item["ssid"]?.toString().orEmpty() }
+                        .sortedByDescending { item -> (item["level"] as? Int) ?: -127 }
+                        .toList()
+                }
+                result.success(networks)
+            } catch (error: Throwable) {
+                result.error("WIFI_SCAN_FAILED", error.message ?: "Unable to scan Wi-Fi", null)
+            }
+        }
+    }
+
     /**
-     * Connects the SDK directly to the Wi-Fi network the tablet is already using.
-     *
-     * This is the primary camera path for DayWeather: the tablet joins the GO
-     * Ultra AP through Android system Wi-Fi, then the SDK is attached to that
-     * Network handle. BLE discovery is intentionally not involved here.
+     * Requests the selected camera AP from inside the app, then attaches the SDK
+     * to the resulting Network handle. Camera discovery and transport stay on Wi-Fi;
+     * the camera BLE path is intentionally disabled.
+     */
+    private fun connectCameraWifi(call: MethodCall, result: MethodChannel.Result) {
+        val ssid = call.argument<String>("ssid")?.trim().orEmpty()
+        val password = call.argument<String>("password") ?: ""
+        if (ssid.isBlank()) {
+            result.error("WIFI_SSID_REQUIRED", "Select a GO Ultra Wi-Fi network first", null)
+            return
+        }
+        connectionJob?.cancel()
+        releaseCamera(cancelConnectionJob = false)
+        unregisterSystemWifiNetworkCallback()
+
+        val builder = WifiNetworkSpecifier.Builder().setSsid(ssid)
+        if (password.isNotEmpty()) builder.setWpa2Passphrase(password)
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .setNetworkSpecifier(builder.build())
+            .build()
+        var finished = false
+        fun fail(code: String, message: String) {
+            if (finished) return
+            finished = true
+            unregisterSystemWifiNetworkCallback()
+            result.error(code, message, null)
+        }
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                if (finished) return
+                diagLog("app wifi available ssid=$ssid handle=${network.networkHandle}")
+                mainScope.launch {
+                    if (finished) return@launch
+                    startSdkWifiConnection(network, ssid, result) {
+                        finished = true
+                    }
+                }
+            }
+
+            override fun onUnavailable() {
+                fail("WIFI_UNAVAILABLE", "无法连接所选 GO Ultra Wi-Fi，请检查密码和相机 Wi-Fi 设置")
+            }
+
+            override fun onLost(network: Network) {
+                if (!finished) {
+                    fail("WIFI_LOST", "GO Ultra Wi-Fi 连接已断开")
+                }
+            }
+        }
+        systemWifiNetworkCallback = callback
+        try {
+            connectivityManager.requestNetwork(request, callback)
+            emitNativeEvent("requesting_wifi", deviceName = "GO Ultra $ssid")
+            diagLog("app wifi request ssid=$ssid")
+        } catch (error: Throwable) {
+            fail("WIFI_REQUEST_FAILED", error.message ?: "Unable to request camera Wi-Fi")
+        }
+    }
+
+    /**
+     * Connects the SDK to a selected Android Wi-Fi Network. This is the same
+     * CameraDevice.get(ConnectType.WIFI) flow used by Android-SDK-2.1.5.
+     */
+    private fun startSdkWifiConnection(
+        network: Network,
+        ssid: String,
+        result: MethodChannel.Result,
+        onFinished: () -> Unit = {},
+    ) {
+        connectionJob?.cancel()
+        currentDeviceId = "wifi:$ssid"
+        currentDeviceName = "GO Ultra $ssid"
+        currentDeviceAddress = null
+        connectionJob = mainScope.launch {
+            try {
+                wifiNetwork = network
+                if (!connectivityManager.bindProcessToNetwork(network)) {
+                    error("Android could not bind the selected Wi-Fi network")
+                }
+                emitNativeEvent("wifi_available", deviceName = currentDeviceName)
+                emitNativeEvent("connecting_wifi", deviceName = currentDeviceName)
+                diagLog("sdk wifi.connect start ssid=$ssid handle=${network.networkHandle}")
+                val wifiCamera = CameraDevice.get(ConnectType.WIFI)
+                wifiCamera.connect(network.networkHandle)
+                    .onSuccess { diagLog("sdk wifi.connect OK ssid=$ssid") }
+                    .onFailure { diagLog("sdk wifi.connect FAIL ssid=$ssid: ${it.message}") }
+                    .getOrThrow()
+                currentCamera = wifiCamera
+                wifiCamera.registerDisconnectListener(disconnectListener)
+                runCatching {
+                    wifiCamera.capture.registerCaptureStatusListener(captureStatusListener)
+                }
+                emitNativeEvent("camera_ready", deviceName = currentDeviceName)
+                startPreview()
+                onFinished()
+                result.success(deviceMapForCamera())
+            } catch (error: CancellationException) {
+                runCatching { releaseCamera(cancelConnectionJob = false) }
+                result.error("CONNECT_CANCELLED", "GO Ultra Wi-Fi connection was cancelled", null)
+            } catch (error: Throwable) {
+                val detail = error.message?.trim().orEmpty()
+                emitNativeEvent("connection_failed", detail)
+                diagLog("sdk wifi.connect error ssid=$ssid: $detail")
+                runCatching { releaseCamera(cancelConnectionJob = false) }
+                onFinished()
+                result.error(
+                    "WIFI_CONNECT_FAILED",
+                    detail.ifBlank { "当前 Wi-Fi 无法访问 GO Ultra 相机" },
+                    null,
+                )
+            } finally {
+                connectionJob = null
+            }
+        }
+    }
+
+    /**
+     * Connects the SDK directly to the Wi-Fi network the app is already using.
+     * This remains as a diagnostic fallback; the normal UI path scans and requests
+     * the selected camera AP inside the app.
      */
     private fun connectCurrentWifiCamera(result: MethodChannel.Result) {
         connectionJob?.cancel()
@@ -356,53 +512,8 @@ class MainActivity : FlutterActivity() {
             )
             return
         }
-        val ssid = currentWifiSsid()
-        currentDeviceId = "wifi:${ssid.ifBlank { network.networkHandle.toString() }}"
-        currentDeviceName = if (ssid.isBlank()) "GO Ultra Wi-Fi" else "GO Ultra $ssid"
-        currentDeviceAddress = null
-        connectionJob = mainScope.launch {
-            try {
-                wifiNetwork = network
-                if (!connectivityManager.bindProcessToNetwork(network)) {
-                    error("Android could not bind the current Wi-Fi network")
-                }
-                emitNativeEvent("connecting_wifi", deviceName = currentDeviceName)
-                diagLog("direct wifi.connect start ssid=$ssid handle=${network.networkHandle}")
-                val wifiCamera = CameraDevice.get(ConnectType.WIFI)
-                wifiCamera.connect(network.networkHandle)
-                    .onSuccess { diagLog("direct wifi.connect OK") }
-                    .onFailure { diagLog("direct wifi.connect FAIL: ${it.message}") }
-                    .getOrThrow()
-                currentCamera = wifiCamera
-                wifiCamera.registerDisconnectListener(disconnectListener)
-                runCatching {
-                    wifiCamera.capture.registerCaptureStatusListener(captureStatusListener)
-                }
-                emitNativeEvent("camera_ready", deviceName = currentDeviceName)
-                startPreview()
-                result.success(deviceMapForCamera())
-            } catch (error: CancellationException) {
-                runCatching { releaseCamera(cancelConnectionJob = false) }
-                result.error("CONNECT_CANCELLED", "GO Ultra Wi-Fi connection was cancelled", null)
-            } catch (error: Throwable) {
-                val detail = error.message?.trim().orEmpty()
-                emitNativeEvent("connection_failed", detail)
-                diagLog("direct wifi.connect error: $detail")
-                runCatching { releaseCamera(cancelConnectionJob = false) }
-                val userMessage = if (detail.contains("camera connect failed", ignoreCase = true)) {
-                    "当前 Wi-Fi 不是可访问的 GO Ultra 相机网络，请先在系统 Wi-Fi 设置中连接相机热点（SDK：$detail）"
-                } else {
-                    detail.ifBlank { "当前 Wi-Fi 无法访问 GO Ultra 相机" }
-                }
-                result.error(
-                    "WIFI_CONNECT_FAILED",
-                    userMessage,
-                    null,
-                )
-            } finally {
-                connectionJob = null
-            }
-        }
+        val ssid = currentWifiSsid().ifBlank { "selected" }
+        startSdkWifiConnection(network, ssid, result)
     }
 
     /** Matches Android-SDK-2.1.5's getWlan0NetworkId implementation. */
@@ -448,8 +559,16 @@ class MainActivity : FlutterActivity() {
         currentDeviceName = null
         currentDeviceAddress = null
         suppressDisconnectEvent = false
+        unregisterSystemWifiNetworkCallback()
         connectivityManager.bindProcessToNetwork(null)
         wifiNetwork = null
+    }
+
+    private fun unregisterSystemWifiNetworkCallback() {
+        val callback = systemWifiNetworkCallback ?: return
+        systemWifiNetworkCallback = null
+        runCatching { connectivityManager.unregisterNetworkCallback(callback) }
+            .onFailure { diagLog("unregister camera wifi callback failed: ${it.message}") }
     }
 
     private fun bindInternetNetwork() {
@@ -1646,6 +1765,11 @@ class MainActivity : FlutterActivity() {
                     step = "functionMode"
                     android.util.Log.d("DayWeather", "preview step: functionMode")
                     camera.capture.functionMode.setValue(FunctionMode.VIDEO_LIVE).getOrThrow()
+                    // GO Ultra can keep the microphone muted independently of the
+                    // phone. Explicitly clear that state before opening the live
+                    // preview so the SDK can deliver PreviewStreamType.AUDIO.
+                    runCatching { camera.system.setMute(false).getOrThrow() }
+                        .onFailure { diagLog("preview unmute failed: ${it.message}") }
                     step = "init"
                     android.util.Log.d("DayWeather", "preview step: init")
                     camera.preview.init(application)
@@ -1825,6 +1949,13 @@ class MainActivity : FlutterActivity() {
         override fun onParamsChanged(paramsUpdate: PreviewStreamParamsUpdate) = Unit
 
         override fun onStreamDataNotify(streamData: PreviewStreamFrame) {
+            val typeName = streamData.type.name
+            val firstType = synchronized(reportedPreviewStreamTypes) {
+                reportedPreviewStreamTypes.add(typeName)
+            }
+            if (firstType) {
+                diagLog("preview stream type=$typeName bytes=${streamData.data.size} ts=${streamData.timestamp}")
+            }
             if (streamData.type.isVideo) {
                 latestVideoTimestamp = streamData.timestamp
             }

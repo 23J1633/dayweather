@@ -43,3 +43,14 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+/android/*.jks
+/android/*.keystore
+
+# Local credentials and signing material (never commit)
+.env
+.env.*
+!.env.example
+.dart-define.local.json
+/android/key.properties
+lib/config/secrets.dart
+lib/**/qwen_key.dart

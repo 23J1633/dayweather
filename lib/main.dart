@@ -910,23 +910,55 @@ class AppController extends ChangeNotifier {
     scanning = true;
     connectionStage = DeviceConnectionStage.scanning;
     connectionStatus = text(
-      '正在检查当前 Wi‑Fi 上的 GO Ultra…',
-      'Checking for GO Ultra on the current Wi‑Fi…',
+      '正在 App 内扫描 GO Ultra Wi‑Fi…',
+      'Scanning for GO Ultra Wi‑Fi in the app…',
     );
     notifyListeners();
     try {
-      await connectCurrentWifiCamera(allowWhileScanning: true);
-      final discovered = List<DeviceRecord>.from(devices);
+      final networks = await native.scanCameraWifi();
+      final discovered = networks
+          .map((item) {
+            final ssid = item['ssid']?.toString().trim() ?? '';
+            if (ssid.isEmpty) return null;
+            final level = item['level'];
+            final frequency = item['frequency'];
+            final signal = level is num ? '${level.round()} dBm' : '--';
+            final band = frequency is num && frequency >= 5000
+                ? '5 GHz'
+                : '2.4 GHz';
+            return DeviceRecord(
+              id: 'wifi:$ssid',
+              name: ssid,
+              model: 'GO Ultra',
+              connection: 'Wi‑Fi',
+              isConnected: false,
+              storage: '$band · $signal',
+              address: ssid,
+            );
+          })
+          .whereType<DeviceRecord>()
+          .toList();
+      devices = discovered;
       analysisMessage = discovered.isNotEmpty
           ? text(
-              '已在当前 Wi‑Fi 上发现 GO Ultra',
-              'GO Ultra found on the current Wi‑Fi',
+              '已扫描到 GO Ultra Wi‑Fi，请选择后输入相机 Wi‑Fi 密码',
+              'GO Ultra Wi‑Fi found; select it and enter the camera Wi‑Fi password',
             )
           : text(
-              '当前 Wi‑Fi 不是 GO Ultra 相机网络',
-              'The current Wi‑Fi is not a GO Ultra camera network',
+              '没有扫描到 GO Ultra Wi‑Fi，请打开相机 Wi‑Fi 后重试',
+              'No GO Ultra Wi‑Fi found; turn on the camera Wi‑Fi and try again',
             );
       scanning = false;
+      connectionStage = DeviceConnectionStage.idle;
+      connectionStatus = discovered.isNotEmpty
+          ? text(
+              '扫描完成：请选择 GO Ultra Wi‑Fi 并输入密码',
+              'Scan complete: select GO Ultra Wi‑Fi and enter its password',
+            )
+          : text(
+              '扫描完成：未发现 GO Ultra Wi‑Fi',
+              'Scan complete: no GO Ultra Wi‑Fi found',
+            );
       notifyListeners();
       return discovered;
     } catch (error) {
@@ -939,11 +971,54 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  /// Requests a Wi-Fi network selected by the in-app scanner, then attaches the
+  /// official SDK to that network. Camera BLE is never involved.
+  Future<void> connectScannedWifiDevice(
+    DeviceRecord device,
+    String password,
+  ) async {
+    if (connectionStage.isBusy || connectedDevice != null) return;
+    final ssid = device.address ?? device.name;
+    connectionStage = DeviceConnectionStage.requestingWifi;
+    connectionStatus = text(
+      '正在连接所选 GO Ultra Wi‑Fi…',
+      'Connecting to the selected GO Ultra Wi‑Fi…',
+    );
+    connectingDeviceId = device.id;
+    lastError = null;
+    previewReady = false;
+    notifyListeners();
+    try {
+      final connected = await native.connectCameraWifi(
+        ssid: ssid,
+        password: password,
+      );
+      final record =
+          connected ?? device.copyWith(isConnected: true, connection: 'Wi‑Fi');
+      _markDeviceConnected(record);
+      connectionStage = DeviceConnectionStage.connected;
+      connectionStatus = text(
+        '已通过 App 选择的相机 Wi‑Fi 连接，正在启动实时视频流…',
+        'Connected through the in-app camera Wi‑Fi selection; starting live video…',
+      );
+      _startAutoSync();
+    } on PlatformException catch (error) {
+      _markConnectionFailed(error.message ?? error.code);
+    } catch (error) {
+      _markConnectionFailed(error.toString());
+    } finally {
+      connectingDeviceId = null;
+      notifyListeners();
+    }
+  }
+
   /// Connects through the Wi-Fi network already selected by Android.
   ///
   /// Camera discovery and connection never use Bluetooth. Bluetooth is reserved
   /// for the independent Mic Pro channel.
-  Future<void> connectCurrentWifiCamera({bool allowWhileScanning = false}) async {
+  Future<void> connectCurrentWifiCamera({
+    bool allowWhileScanning = false,
+  }) async {
     if ((!allowWhileScanning && connectionStage.isBusy) ||
         connectedDevice != null) {
       return;
@@ -991,7 +1066,7 @@ class AppController extends ChangeNotifier {
   /// GO Ultra is deliberately never connected through BLE. The system Wi-Fi
   /// hand-off keeps the camera transport separate from MicPro's BLE channel.
   Future<void> connectCameraAutomatically() async {
-    await connectCurrentWifiCamera();
+    await scanDevices();
   }
 
   Future<void> toggleDevice(DeviceRecord device) async {
@@ -1016,8 +1091,8 @@ class AppController extends ChangeNotifier {
       return;
     }
     if (connectionStage.isBusy) return;
-    // A scanned BLE identity is only informational. The actual camera session
-    // must always attach to the Wi-Fi network selected by Android.
+    // Camera cards are created by the in-app Wi-Fi scan. The password dialog in
+    // the device page completes the selected network request.
     await connectCurrentWifiCamera();
   }
 

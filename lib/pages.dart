@@ -3214,8 +3214,8 @@ class DevicesPage extends StatelessWidget {
             eyebrow: 'HARDWARE / INPUT',
             title: controller.text('设备连接', 'Devices'),
             subtitle: controller.text(
-              '通过 GO Ultra 相机 Wi‑Fi 接收带时间轴的影像与声音。',
-              'Use GO Ultra camera Wi‑Fi for timestamped video and audio.',
+              '先在 App 内扫描 GO Ultra Wi‑Fi，再由 SDK 建立视频与音频链路。',
+              'Scan GO Ultra Wi‑Fi in the app, then let the SDK establish video and audio.',
             ),
             trailing: const _IconBadge(
               icon: material.Icons.wifi_rounded,
@@ -3252,8 +3252,8 @@ class DevicesPage extends StatelessWidget {
                           const SizedBox(height: 4),
                           Text(
                             controller.text(
-                              '相机连接只使用当前 Wi‑Fi；不会通过蓝牙连接 GO Ultra',
-                              'The camera uses current Wi‑Fi only; GO Ultra is never connected over Bluetooth',
+                              '相机只使用 Wi‑Fi；App 扫描和连接都不调用相机蓝牙',
+                              'The camera uses Wi‑Fi only; in-app scan and connection never use camera Bluetooth',
                             ),
                             style: TextStyle(
                               color: colors.mutedForeground,
@@ -3296,8 +3296,8 @@ class DevicesPage extends StatelessWidget {
                               DeviceConnectionStage.connectingWifi
                           ? controller.text('连接中…', 'Connecting…')
                           : controller.text(
-                              '自动连接 GO Ultra（Wi‑Fi）',
-                              'Auto-connect GO Ultra (Wi‑Fi)',
+                              '扫描 GO Ultra Wi‑Fi',
+                              'Scan GO Ultra Wi‑Fi',
                             ),
                     ),
                   ),
@@ -3323,7 +3323,10 @@ class DevicesPage extends StatelessWidget {
                             size: 18,
                           ),
                     child: Text(
-                      controller.text('仅连接当前 Wi‑Fi', 'Use current Wi‑Fi only'),
+                      controller.text(
+                        '连接当前已选 Wi‑Fi（备用）',
+                        'Use already selected Wi‑Fi (fallback)',
+                      ),
                     ),
                   ),
                 ),
@@ -3351,8 +3354,8 @@ class DevicesPage extends StatelessWidget {
                       controller.scanning
                           ? controller.text('检查中…', 'Checking…')
                           : controller.text(
-                              '检查当前 Wi‑Fi（不使用蓝牙）',
-                              'Check current Wi‑Fi (no Bluetooth)',
+                              '重新扫描相机 Wi‑Fi（不使用蓝牙）',
+                              'Rescan camera Wi‑Fi (no Bluetooth)',
                             ),
                     ),
                   ),
@@ -3375,8 +3378,8 @@ class DevicesPage extends StatelessWidget {
               icon: material.Icons.devices_other_rounded,
               title: controller.text('还没有设备', 'No devices yet'),
               subtitle: controller.text(
-                '打开 GO Ultra 后点击扫描。',
-                'Turn on GO Ultra and scan again.',
+                '打开 GO Ultra 的 Wi‑Fi 后，在 App 内点击扫描。',
+                'Turn on GO Ultra Wi‑Fi, then scan inside the app.',
               ),
             ),
           for (final device in visibleDevices) ...[
@@ -3576,6 +3579,48 @@ class DeviceCard extends StatelessWidget {
   final DeviceRecord device;
   final AppController controller;
 
+  Future<void> _showWifiPasswordDialog(BuildContext context) async {
+    final passwordController = material.TextEditingController();
+    final password = await material.showDialog<String>(
+      context: context,
+      builder: (dialogContext) => material.AlertDialog(
+        title: Text(
+          controller.text('连接 GO Ultra Wi‑Fi', 'Connect GO Ultra Wi‑Fi'),
+        ),
+        content: material.TextField(
+          controller: passwordController,
+          autofocus: true,
+          obscureText: true,
+          textInputAction: material.TextInputAction.done,
+          decoration: material.InputDecoration(
+            labelText: controller.text('Wi‑Fi 密码', 'Wi‑Fi password'),
+            helperText: controller.text(
+              '相机下拉菜单 → 设置 → Wi‑Fi 设置可查看密码',
+              'Camera swipe-down menu → Settings → Wi‑Fi Settings',
+            ),
+          ),
+          onSubmitted: (value) =>
+              material.Navigator.of(dialogContext).pop(value),
+        ),
+        actions: [
+          material.TextButton(
+            onPressed: () => material.Navigator.of(dialogContext).pop(),
+            child: Text(controller.text('取消', 'Cancel')),
+          ),
+          material.FilledButton(
+            onPressed: () => material.Navigator.of(
+              dialogContext,
+            ).pop(passwordController.text),
+            child: Text(controller.text('连接', 'Connect')),
+          ),
+        ],
+      ),
+    );
+    passwordController.dispose();
+    if (password == null) return;
+    await controller.connectScannedWifiDevice(device, password);
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
@@ -3701,13 +3746,16 @@ class DeviceCard extends StatelessWidget {
                         density: ButtonDensity.dense,
                         onPressed: anotherDeviceBusy
                             ? null
-                            : () => controller.connectCurrentWifiCamera(),
+                            : () => _showWifiPasswordDialog(context),
                         leading: const material.Icon(
                           material.Icons.wifi_rounded,
                           size: 15,
                         ),
                         child: Text(
-                          controller.text('使用当前 Wi‑Fi', 'Use current Wi‑Fi'),
+                          controller.text(
+                            '在 App 内连接此 Wi‑Fi',
+                            'Connect this Wi‑Fi in app',
+                          ),
                         ),
                       ),
               ),
